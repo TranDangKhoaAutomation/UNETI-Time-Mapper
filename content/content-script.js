@@ -3350,6 +3350,7 @@
       "#xemDiem_aaa td.tdk-grade-cell-changed{background:#fef9c3 !important}" +
       "#xemDiem_aaa tr.tdk-grade-row-changed td{box-shadow: inset 0 0 0 1px rgba(234,179,8,.18)}" +
       "#xemDiem_aaa tr.tdk-grade-row-selected td{box-shadow: inset 0 0 0 2px rgba(37,99,235,.28)}" +
+      "#xemDiem_aaa tr.tdk-grade-generated-summary td{background:#fff}" +
       "#xemDiem_aaa span.tdk-grade-summary-changed{background:#fef3c7;padding:1px 4px;border-radius:4px}" +
       ".tdk-grade-inline-input{width:100%;min-width:54px;height:28px;border:1px solid #93c5fd;border-radius:4px;padding:0 6px;font-size:12px;line-height:28px}";
     document.head.appendChild(style);
@@ -3371,7 +3372,9 @@
         gpa10: [],
         gpa4: [],
         credits: [],
-        debt: []
+        debt: [],
+        xepLoai: [],
+        academic: []
       }
     };
   }
@@ -3381,7 +3384,9 @@
       gpa10: [],
       gpa4: [],
       credits: [],
-      debt: []
+      debt: [],
+      xepLoai: [],
+      academic: []
     };
   }
 
@@ -3390,7 +3395,8 @@
     if (!bucket.terms.has(key)) {
       bucket.terms.set(key, {
         gpa10: [],
-        gpa4: []
+        gpa4: [],
+        xepLoai: []
       });
     }
     bucket.terms.get(key)[field].push(node);
@@ -3409,8 +3415,257 @@
     bucket.cumulativeByTerm.get(normalizedKey)[field].push(node);
   }
 
+  function hasAnyGradePredictionChange(records) {
+    return Array.isArray(records) && records.some((record) => (
+      record && record.predicted && record.predicted.changed === true
+    ));
+  }
+
+  function getGradeTableColumnCount(table) {
+    const rows = table ? Array.from(table.querySelectorAll("tr")) : [];
+    let maxCount = 0;
+    for (const row of rows) {
+      const count = Array.from(row.cells || []).reduce((sum, cell) => {
+        const span = Number.parseInt(cell.getAttribute("colspan") || cell.colSpan || "1", 10);
+        return sum + (Number.isFinite(span) && span > 0 ? span : 1);
+      }, 0);
+      maxCount = Math.max(maxCount, count);
+    }
+    return maxCount || 4;
+  }
+
+  function createGeneratedSummaryCell(lang, label, value, options = {}) {
+    const cell = document.createElement("td");
+    const colspan = Number.isFinite(options.colSpan) && options.colSpan > 0 ? options.colSpan : 2;
+    cell.colSpan = colspan;
+    if (options.sticky !== false) {
+      cell.className = "sticky-col";
+      cell.style.verticalAlign = "top";
+      cell.style.textAlign = "left";
+      cell.style.left = options.left || "0px";
+    }
+
+    const labelEl = document.createElement("span");
+    labelEl.lang = lang;
+    labelEl.textContent = label;
+    const valueEl = document.createElement("span");
+    valueEl.textContent = Number.isFinite(value)
+      ? ` ${formatGradeSummaryNumber(value)}`
+      : text(value)
+        ? ` ${text(value)}`
+        : " --";
+    cell.appendChild(labelEl);
+    cell.appendChild(valueEl);
+    return cell;
+  }
+
+  function createGeneratedGradeSummaryRow(left, right, fillerColSpan) {
+    const row = document.createElement("tr");
+    row.className = "tdk-grade-generated-summary";
+    row.appendChild(createGeneratedSummaryCell(left.lang, left.label, left.value, { left: "0px" }));
+    row.appendChild(createGeneratedSummaryCell(right.lang, right.label, right.value, { left: "248px" }));
+    if (fillerColSpan > 0) {
+      const filler = document.createElement("td");
+      filler.colSpan = fillerColSpan;
+      row.appendChild(filler);
+    }
+    return row;
+  }
+
+  function collectExistingSummaryFieldsByTerm(table) {
+    const fieldsByTerm = new Map();
+    let currentTermLabel = "";
+    let currentYearLabel = "";
+    const rows = table ? Array.from(table.querySelectorAll("tbody tr")) : [];
+
+    for (const row of rows) {
+      const headingCell = row.querySelector("td.row-head");
+      if (headingCell) {
+        const heading = parseGradeTermHeading(headingCell.textContent);
+        if (heading) {
+          currentTermLabel = heading.termLabel;
+          currentYearLabel = heading.yearLabel;
+        }
+        continue;
+      }
+
+      const key = buildGradeTermKey(currentYearLabel, currentTermLabel);
+      if (!text(currentYearLabel) && !text(currentTermLabel)) continue;
+      if (!fieldsByTerm.has(key)) fieldsByTerm.set(key, new Set());
+      const fields = fieldsByTerm.get(key);
+
+      for (const span of Array.from(row.querySelectorAll("span[lang]"))) {
+        const lang = text(span.getAttribute("lang")).toLowerCase();
+        if (lang.includes("kqht-tkhk-diemtbhocluc") && !lang.includes("tichluy")) fields.add("termGpa10");
+        if (lang.includes("kqht-tkhk-diemtbtinchi") && !lang.includes("tichluy")) fields.add("termGpa4");
+        if (lang.includes("kqht-tkhk-diemtbhocluctichluy")) fields.add("cumGpa10");
+        if (lang.includes("kqht-tkhk-diemtbtinchitichluy")) fields.add("cumGpa4");
+        if (lang.includes("kqht-tkhk-sotctichluy")) fields.add("cumCredits");
+        if (lang.includes("kqht-tkhk-sotckhongdat")) fields.add("cumDebt");
+        if (lang.includes("kqht-tkhk-xeploaihocluc") && !lang.includes("tichluy")) fields.add("termXepLoai");
+        if (lang.includes("kqht-tkhk-xeploaihocluctichluy")) fields.add("cumXepLoai");
+        if (lang.includes("kqht-tkhk-ghichu")) fields.add("academic");
+      }
+    }
+
+    return fieldsByTerm;
+  }
+
+  function findLastGradeRowForTerm(table, yearLabel, termLabel) {
+    const key = buildGradeTermKey(yearLabel, termLabel);
+    let currentTermLabel = "";
+    let currentYearLabel = "";
+    let lastRow = null;
+    const rows = table ? Array.from(table.querySelectorAll("tbody tr")) : [];
+
+    for (const row of rows) {
+      const headingCell = row.querySelector("td.row-head");
+      if (headingCell) {
+        const heading = parseGradeTermHeading(headingCell.textContent);
+        if (heading) {
+          currentTermLabel = heading.termLabel;
+          currentYearLabel = heading.yearLabel;
+        }
+        continue;
+      }
+
+      if (buildGradeTermKey(currentYearLabel, currentTermLabel) !== key) continue;
+      if (row.classList.contains("tdk-grade-generated-summary")) {
+        lastRow = row;
+        continue;
+      }
+
+      const cells = Array.from(row.cells || []);
+      if (!cells.length) continue;
+      const fieldMap = getGradeFieldCellMap(row);
+      const classCode = text(cells[1] && cells[1].textContent);
+      const courseName = text(cells[2] && cells[2].textContent);
+      if (isGradeRecordCandidate(row, classCode, courseName, fieldMap)) {
+        lastRow = row;
+      }
+    }
+
+    return lastRow;
+  }
+
+  function ensureGeneratedGradeSummaryRows(table, state) {
+    if (!table || !state || !Array.isArray(state.records) || !state.records.length) return;
+
+    const summary = calculateGradeSummary(state.records, state.webSummary);
+    const cumulativeByTerm = buildCumulativeByTermForVisual(state.records, summary.terms);
+    const existing = collectExistingSummaryFieldsByTerm(table);
+    const fillerColSpan = Math.max(1, getGradeTableColumnCount(table) - 4);
+
+    for (const term of summary.terms) {
+      const key = buildGradeTermKey(term.yearLabel, term.termLabel);
+      const fields = existing.get(key) || new Set();
+      const needsTerm = !(fields.has("termGpa10") && fields.has("termGpa4"));
+      const needsCumulative = !(
+        fields.has("cumGpa10") &&
+        fields.has("cumGpa4") &&
+        fields.has("cumCredits") &&
+        fields.has("cumDebt") &&
+        fields.has("cumXepLoai") &&
+        fields.has("academic") &&
+        fields.has("termXepLoai")
+      );
+      if (!needsTerm && !needsCumulative) continue;
+
+      const anchor = findLastGradeRowForTerm(table, term.yearLabel, term.termLabel);
+      if (!anchor || !anchor.parentElement) continue;
+
+      let insertAfter = anchor;
+      const cumulative = cumulativeByTerm.get(key);
+      const rowsToInsert = [];
+      if (needsTerm) {
+        rowsToInsert.push(createGeneratedGradeSummaryRow(
+          {
+            lang: "kqht-tkhk-diemtbhocluc",
+            label: "Điểm trung bình học kỳ hệ 10:",
+            value: term.predicted.gpa10
+          },
+          {
+            lang: "kqht-tkhk-diemtbtinchi",
+            label: "Điểm trung bình học kỳ hệ 4:",
+            value: term.predicted.gpa4
+          },
+          fillerColSpan
+        ));
+      }
+      if (needsCumulative) {
+        rowsToInsert.push(createGeneratedGradeSummaryRow(
+          {
+            lang: "kqht-tkhk-diemtbhocluctichluy",
+            label: "Điểm trung bình tích lũy:",
+            value: cumulative && cumulative.predicted ? cumulative.predicted.gpa10 : null
+          },
+          {
+            lang: "kqht-tkhk-diemtbtinchitichluy",
+            label: "Điểm trung bình tích lũy (hệ 4):",
+            value: cumulative && cumulative.predicted ? cumulative.predicted.gpa4 : null
+          },
+          fillerColSpan
+        ));
+        rowsToInsert.push(createGeneratedGradeSummaryRow(
+          {
+            lang: "kqht-tkhk-tongsotcdangky",
+            label: "Tổng số tín chỉ đã đăng ký:",
+            value: term.predicted.attemptedCredits
+          },
+          {
+            lang: "kqht-tkhk-sotctichluy",
+            label: "Tổng số tín chỉ tích lũy:",
+            value: cumulative && cumulative.predicted ? cumulative.predicted.earnedCredits : null
+          },
+          fillerColSpan
+        ));
+        rowsToInsert.push(createGeneratedGradeSummaryRow(
+          {
+            lang: "kqht-tkhk-sotckhongdat",
+            label: "Tổng số tín chỉ nợ tính đến hiện tại:",
+            value: cumulative && cumulative.predicted ? cumulative.predicted.debtCredits : null
+          },
+          {
+            lang: "kqht-tkhk-xeploaihocluctichluy",
+            label: "Xếp loại học lực tích lũy:",
+            value: cumulative && cumulative.predicted ? summaryGradeRank(cumulative.predicted) : ""
+          },
+          fillerColSpan
+        ));
+        rowsToInsert.push(createGeneratedGradeSummaryRow(
+          {
+            lang: "kqht-tkhk-xeploaihocluc",
+            label: "Xếp loại học lực học kỳ:",
+            value: summaryGradeRank(term.predicted)
+          },
+          {
+            lang: "kqht-tkhk-ghichu",
+            label: "Xử lý học vụ:",
+            value: "Học tiếp"
+          },
+          fillerColSpan
+        ));
+      }
+
+      for (const row of rowsToInsert) {
+        insertAfter.after(row);
+        insertAfter = row;
+      }
+    }
+  }
+
+  function removeGeneratedGradeSummaryRows(table) {
+    if (!table) return;
+    for (const row of Array.from(table.querySelectorAll("tr.tdk-grade-generated-summary"))) {
+      row.remove();
+    }
+  }
+
   function collectSummaryRefsFromTable(table, state) {
     const refs = createEmptySummaryRefs();
+    if (state && state.inlineEnabled === true && hasAnyGradePredictionChange(state.records)) {
+      ensureGeneratedGradeSummaryRows(table, state);
+    }
     let currentTermLabel = "";
     let currentYearLabel = "";
     const rows = table ? Array.from(table.querySelectorAll("tbody tr")) : [];
@@ -3437,11 +3692,16 @@
         if (!state.summaryOriginalValues.has(valueEl)) {
           state.summaryOriginalValues.set(valueEl, parseLocaleNumber(valueEl.textContent));
         }
+        if (state.summaryOriginalTextValues && !state.summaryOriginalTextValues.has(valueEl)) {
+          state.summaryOriginalTextValues.set(valueEl, text(valueEl.textContent));
+        }
 
         if (lang.includes("kqht-tkhk-diemtbhocluc") && !lang.includes("tichluy")) {
           appendSummaryRef(refs, buildGradeTermKey(currentYearLabel, currentTermLabel), "gpa10", valueEl);
         } else if (lang.includes("kqht-tkhk-diemtbtinchi") && !lang.includes("tichluy")) {
           appendSummaryRef(refs, buildGradeTermKey(currentYearLabel, currentTermLabel), "gpa4", valueEl);
+        } else if (lang.includes("kqht-tkhk-xeploaihocluc") && !lang.includes("tichluy")) {
+          appendSummaryRef(refs, buildGradeTermKey(currentYearLabel, currentTermLabel), "xepLoai", valueEl);
         } else if (lang.includes("kqht-tkhk-diemtbhocluctichluy")) {
           appendCumulativeSummaryRef(refs, buildGradeTermKey(currentYearLabel, currentTermLabel), "gpa10", valueEl);
         } else if (lang.includes("kqht-tkhk-diemtbtinchitichluy")) {
@@ -3450,6 +3710,10 @@
           appendCumulativeSummaryRef(refs, buildGradeTermKey(currentYearLabel, currentTermLabel), "credits", valueEl);
         } else if (lang.includes("kqht-tkhk-sotckhongdat")) {
           appendCumulativeSummaryRef(refs, buildGradeTermKey(currentYearLabel, currentTermLabel), "debt", valueEl);
+        } else if (lang.includes("kqht-tkhk-xeploaihocluctichluy")) {
+          appendCumulativeSummaryRef(refs, buildGradeTermKey(currentYearLabel, currentTermLabel), "xepLoai", valueEl);
+        } else if (lang.includes("kqht-tkhk-ghichu")) {
+          appendCumulativeSummaryRef(refs, buildGradeTermKey(currentYearLabel, currentTermLabel), "academic", valueEl);
         }
       }
     }
@@ -3463,6 +3727,48 @@
     const base = state.summaryOriginalValues.get(node);
     const changed = Number.isFinite(base) ? !isSameNumericValue(base, value) : Number.isFinite(value);
     node.classList.toggle("tdk-grade-summary-changed", changed);
+  }
+
+  function setSummaryTextNodeValue(state, node, value) {
+    if (!(node instanceof Element)) return;
+    const nextValue = text(value) || "--";
+    node.textContent = ` ${nextValue}`;
+    const base = state.summaryOriginalTextValues && state.summaryOriginalTextValues.get(node);
+    const changed = text(base) ? !isSameTextValue(base, nextValue) : text(nextValue) !== "--";
+    node.classList.toggle("tdk-grade-summary-changed", changed);
+  }
+
+  function restoreSummaryNodeOriginalValue(state, node) {
+    if (!(node instanceof Element)) return;
+    const originalText = state.summaryOriginalTextValues && state.summaryOriginalTextValues.get(node);
+    if (typeof originalText === "string") {
+      node.textContent = originalText ? ` ${originalText}` : "";
+    } else {
+      const originalNumber = state.summaryOriginalValues && state.summaryOriginalValues.get(node);
+      node.textContent = Number.isFinite(originalNumber) ? ` ${formatGradeSummaryNumber(originalNumber)}` : "";
+    }
+    node.classList.remove("tdk-grade-summary-changed");
+  }
+
+  function restoreSummaryVisual(state) {
+    if (!state || !state.summaryRefs) return;
+    const visitBucket = (bucket) => {
+      if (!bucket) return;
+      for (const list of Object.values(bucket)) {
+        if (!Array.isArray(list)) continue;
+        for (const node of list) {
+          restoreSummaryNodeOriginalValue(state, node);
+        }
+      }
+    };
+
+    for (const refs of state.summaryRefs.terms.values()) {
+      visitBucket(refs);
+    }
+    for (const refs of state.summaryRefs.cumulativeByTerm.values()) {
+      visitBucket(refs);
+    }
+    visitBucket(state.summaryRefs.cumulative);
   }
 
   function setPassCellValue(cell, passValue) {
@@ -3491,10 +3797,12 @@
     if (!record.edit.componentFieldValues || typeof record.edit.componentFieldValues !== "object") {
       record.edit.componentFieldValues = { ...(record.baseComponentFieldValues || buildComponentFieldValuesFromRecord(record)) };
     }
+    if (!isGradeEditableTitle(title)) return;
+
+    record.edit.componentFieldValues[title] = Number.isFinite(scoreValue) ? scoreValue : null;
     if (title === "DiemThi" || title.startsWith("DiemChuyenCan") || title.startsWith("DiemThuongKy") || title.startsWith("DiemHeSo") || title.startsWith("DiemThucHanh")) {
-      record.edit.componentFieldValues[title] = Number.isFinite(scoreValue) ? scoreValue : null;
       recomputeComponentEditFromFieldValues(record.edit);
-      const derived = deriveGradeFromComponentEdits(record.edit.componentEdit);
+      const derived = deriveGradeFromComponentEdits(record.edit.componentEdit, record.components.tbThuongKy);
       if (Number.isFinite(derived.total10Calc)) {
         record.edit.total10Edit = normalizeScore10(derived.total10Calc);
         record.edit.lastEditedSource = "component";
@@ -3509,19 +3817,8 @@
       }
       return;
     }
-    if (GRADE_TOTAL10_TITLES.includes(title)) {
-      if (Number.isFinite(scoreValue)) {
-        record.edit.total10Edit = scoreValue;
-        syncPredictionFromQuick(record);
-      } else {
-        record.edit.total10Edit = Number.isFinite(record.total10)
-          ? normalizeScore10(record.total10)
-          : Number.isFinite(record.rawTotal10)
-            ? normalizeScore10(record.rawTotal10)
-            : null;
-        syncPredictionFromQuick(record);
-      }
-    }
+
+    record.predicted = buildGradePrediction(record);
   }
 
   function buildInlineBindingsForState(state, table) {
@@ -3572,9 +3869,26 @@
         }
       }
 
-      for (const title of GRADE_EDITABLE_TITLES) {
+      const editableTitles = Object.keys(fieldMap).filter((title) => isGradeEditableTitle(title));
+      for (const title of editableTitles) {
         const cell = firstGradeFieldCell(fieldMap, title);
         if (!cell) continue;
+        const parsedCellValue = parseScore10FromCell(cell);
+        if (!record.baseComponentFieldValues || typeof record.baseComponentFieldValues !== "object") {
+          record.baseComponentFieldValues = buildComponentFieldValuesFromRecord(record);
+        }
+        if (!record.edit || typeof record.edit !== "object") {
+          record.edit = createDefaultGradeEdit(record);
+        }
+        if (!record.edit.componentFieldValues || typeof record.edit.componentFieldValues !== "object") {
+          record.edit.componentFieldValues = { ...record.baseComponentFieldValues };
+        }
+        if (!(title in record.baseComponentFieldValues)) {
+          record.baseComponentFieldValues[title] = Number.isFinite(parsedCellValue) ? parsedCellValue : null;
+        }
+        if (!(title in record.edit.componentFieldValues)) {
+          record.edit.componentFieldValues[title] = record.baseComponentFieldValues[title];
+        }
         rowBinding.cellsByTitle[title] = cell;
         cell.classList.add("tdk-grade-inline-editable");
         cellToMeta.set(cell, {
@@ -3676,7 +3990,11 @@
     const baseComponentValues = record.baseComponentFieldValues || buildComponentFieldValuesFromRecord(record);
     let rowChanged = false;
 
-    for (const title of GRADE_COMPONENT_TITLES) {
+    const editableTitles = new Set([
+      ...GRADE_COMPONENT_TITLES,
+      ...Object.keys(binding.cellsByTitle || {})
+    ]);
+    for (const title of editableTitles) {
       const cell = binding.cellsByTitle[title];
       if (!cell) continue;
       const value = componentValues[title];
@@ -3704,7 +4022,8 @@
     }
 
     if (binding.tbCell) {
-      const useCalculatedTb = record.edit && record.edit.lastEditedSource === "component";
+      const source = record.edit ? text(record.edit.lastEditedSource) : "";
+      const useCalculatedTb = source === "component" || source === "component_pending";
       const tbValue = useCalculatedTb && Number.isFinite(record.predicted && record.predicted.tbThuongKyCalc)
         ? record.predicted.tbThuongKyCalc
         : record.components.tbThuongKy;
@@ -3854,6 +4173,9 @@
       for (const node of refs.gpa4) {
         setSummaryNodeValue(state, node, term.predicted.gpa4);
       }
+      for (const node of refs.xepLoai) {
+        setSummaryTextNodeValue(state, node, summaryGradeRank(term.predicted));
+      }
 
       const cumulativeRefs = state.summaryRefs.cumulativeByTerm.get(key);
       const cumulativeTerm = cumulativeByTerm.get(key);
@@ -3869,6 +4191,12 @@
         }
         for (const node of cumulativeRefs.debt) {
           setSummaryNodeValue(state, node, cumulativeTerm.predicted.debtCredits);
+        }
+        for (const node of cumulativeRefs.xepLoai) {
+          setSummaryTextNodeValue(state, node, summaryGradeRank(cumulativeTerm.predicted));
+        }
+        for (const node of cumulativeRefs.academic) {
+          setSummaryTextNodeValue(state, node, "Học tiếp");
         }
       }
     }
@@ -3886,6 +4214,12 @@
     for (const node of state.summaryRefs.cumulative.debt) {
       setSummaryNodeValue(state, node, summary.cumulative.predicted.debtCredits);
     }
+    for (const node of state.summaryRefs.cumulative.xepLoai) {
+      setSummaryTextNodeValue(state, node, summaryGradeRank(summary.cumulative.predicted));
+    }
+    for (const node of state.summaryRefs.cumulative.academic) {
+      setSummaryTextNodeValue(state, node, "Học tiếp");
+    }
   }
 
   function renderGradeInlineState(state) {
@@ -3894,6 +4228,20 @@
       applyRecordRowVisual(state, record);
     }
     refreshSelectedRowVisual(state);
+    const table = getGradeTable();
+    const hasChanges = hasAnyGradePredictionChange(state.records);
+    if (!hasChanges) {
+      restoreSummaryVisual(state);
+      removeGeneratedGradeSummaryRows(table);
+      if (table) {
+        state.summaryRefs = collectSummaryRefsFromTable(table, state);
+      }
+      return;
+    }
+    if (table && state.inlineEnabled === true) {
+      ensureGeneratedGradeSummaryRows(table, state);
+      state.summaryRefs = collectSummaryRefsFromTable(table, state);
+    }
     applySummaryVisual(state);
   }
 
@@ -3902,6 +4250,9 @@
     if (!state) return null;
     if (!(state.summaryOriginalValues instanceof WeakMap)) {
       state.summaryOriginalValues = new WeakMap();
+    }
+    if (!(state.summaryOriginalTextValues instanceof WeakMap)) {
+      state.summaryOriginalTextValues = new WeakMap();
     }
     if (typeof state.inlineEnabled !== "boolean") {
       state.inlineEnabled = false;
@@ -3961,9 +4312,8 @@
     const input = document.createElement("input");
     input.type = "text";
     input.className = "tdk-grade-inline-input";
-    const currentValue = GRADE_TOTAL10_TITLES.includes(title)
-      ? record.predicted && Number.isFinite(record.predicted.total10Edit) ? record.predicted.total10Edit : null
-      : record.edit && record.edit.componentFieldValues ? record.edit.componentFieldValues[title] : null;
+    const editValue = record.edit && record.edit.componentFieldValues ? record.edit.componentFieldValues[title] : null;
+    const currentValue = Number.isFinite(editValue) ? editValue : parseScore10FromCell(cell);
     input.value = Number.isFinite(currentValue) ? String(currentValue).replace(".", ",") : "";
 
     cell.dataset.tdkEditing = "1";
@@ -3996,7 +4346,7 @@
   function applyComponentCalculation(record) {
     if (!record || !record.edit) return false;
     recomputeComponentEditFromFieldValues(record.edit);
-    const derived = deriveGradeFromComponentEdits(record.edit.componentEdit);
+    const derived = deriveGradeFromComponentEdits(record.edit.componentEdit, record.components.tbThuongKy);
     if (!Number.isFinite(derived.tbThuongKyCalc)) {
       return false;
     }
@@ -4113,7 +4463,18 @@
           return;
         }
 
-        const meta = state.cellToMeta instanceof WeakMap ? state.cellToMeta.get(cell) : null;
+        let meta = state.cellToMeta instanceof WeakMap ? state.cellToMeta.get(cell) : null;
+        if (!meta) {
+          const fallbackTitle = parseGradeCellTitle(cell);
+          const fallbackRow = cell.closest("tr[data-tdk-record-key]");
+          const fallbackKey = fallbackRow ? text(fallbackRow.getAttribute("data-tdk-record-key")) : "";
+          if (fallbackTitle && fallbackKey) {
+            meta = {
+              recordKey: fallbackKey,
+              title: fallbackTitle
+            };
+          }
+        }
         if (!meta || !isGradeEditableTitle(meta.title)) return;
 
         const record = state.records.find((item) => item.recordKey === meta.recordKey);
@@ -4146,8 +4507,13 @@
       return;
     }
     state.inlineEnabled = !state.inlineEnabled;
+    const table = getGradeTable();
     if (!state.inlineEnabled) {
       closeActiveInlineEditor(state, true);
+      removeGeneratedGradeSummaryRows(table);
+    } else if (table) {
+      buildInlineBindingsForState(state, table);
+      renderGradeInlineState(state);
     }
     refreshGradeInlineControlState(state);
     setGradeInlineStatus(
@@ -4293,9 +4659,18 @@
 
   function syncPredictionFromComponents(record) {
     recomputeComponentEditFromFieldValues(record.edit);
-    const derived = deriveGradeFromComponentEdits(record.edit.componentEdit);
-    record.edit.total10Edit = Number.isFinite(derived.total10Calc) ? derived.total10Calc : null;
-    record.edit.lastEditedSource = "component";
+    const derived = deriveGradeFromComponentEdits(record.edit.componentEdit, record.components.tbThuongKy);
+    if (Number.isFinite(derived.total10Calc)) {
+      record.edit.total10Edit = derived.total10Calc;
+      record.edit.lastEditedSource = "component";
+    } else {
+      record.edit.total10Edit = Number.isFinite(record.total10)
+        ? normalizeScore10(record.total10)
+        : Number.isFinite(record.rawTotal10)
+          ? normalizeScore10(record.rawTotal10)
+          : null;
+      record.edit.lastEditedSource = "component_pending";
+    }
     record.predicted = buildGradePrediction(record);
     record.predicted.tbThuongKyCalc = derived.tbThuongKyCalc;
   }
@@ -4634,7 +5009,17 @@
     "DiemThucHanh2",
     "DiemThi"
   ];
-  const GRADE_EDITABLE_TITLES = new Set([...GRADE_TOTAL10_TITLES, ...GRADE_COMPONENT_TITLES]);
+  const GRADE_FORMULA_TITLES = new Set([
+    "DiemTBThuongKy",
+    "DiemTongKet1",
+    "DiemTongKet",
+    "DiemTinChi",
+    "DiemChu",
+    "XepLoai",
+    "IsDat",
+    "Dat"
+  ]);
+  const GRADE_EDITABLE_TITLES = new Set(GRADE_COMPONENT_TITLES);
   const GRADE_EXCLUDED_COURSE_PATTERNS = [
     /toeic|diem test tieng anh dau vao/i,
     /giao duc the chat|quoc phong|an ninh/i,
@@ -4642,7 +5027,9 @@
   ];
 
   function isGradeEditableTitle(titleValue) {
-    return GRADE_EDITABLE_TITLES.has(text(titleValue));
+    const title = text(titleValue);
+    if (!title || GRADE_FORMULA_TITLES.has(title)) return false;
+    return GRADE_EDITABLE_TITLES.has(title) || /^Diem[A-Za-z0-9_]+$/i.test(title);
   }
 
   function isExcludedCourseNameForGPA(courseName) {
@@ -4708,6 +5095,22 @@
     if (total10 >= 6.5) return "Trung bình Khá";
     if (total10 >= 5.0) return "Trung bình";
     return "Kém";
+  }
+
+  function gpa4ToAcademicRank(gpa4) {
+    if (!Number.isFinite(gpa4)) return "";
+    if (gpa4 >= 3.6) return "Xuất sắc";
+    if (gpa4 >= 3.2) return "Giỏi";
+    if (gpa4 >= 2.5) return "Khá";
+    if (gpa4 >= 2.0) return "Trung bình";
+    if (gpa4 >= 1.0) return "Yếu";
+    return "Kém";
+  }
+
+  function summaryGradeRank(summaryPart) {
+    const source = summaryPart && typeof summaryPart === "object" ? summaryPart : {};
+    if (Number.isFinite(source.gpa4)) return gpa4ToAcademicRank(source.gpa4);
+    return score10ToXepLoai(source.gpa10, "");
   }
 
   function isVisualRedColor(colorValue) {
@@ -5145,8 +5548,10 @@
       hs1.push(values[`DiemHeSo1${i}`]);
       hs2.push(values[`DiemHeSo2${i}`]);
     }
-    for (let i = 1; i <= 2; i += 1) {
-      th.push(values[`DiemThucHanh${i}`]);
+    for (const key of Object.keys(values)) {
+      if (/^DiemThucHanh\d+$/i.test(key)) {
+        th.push(values[key]);
+      }
     }
 
     edit.componentEdit = {
@@ -5162,7 +5567,9 @@
   function isComponentFieldChanged(record, edit) {
     const base = record.baseComponentFieldValues || buildComponentFieldValuesFromRecord(record);
     const current = edit && edit.componentFieldValues ? edit.componentFieldValues : {};
-    for (const title of GRADE_COMPONENT_TITLES) {
+    const titles = new Set([...GRADE_COMPONENT_TITLES, ...Object.keys(base), ...Object.keys(current)]);
+    for (const title of titles) {
+      if (!isGradeEditableTitle(title)) continue;
       if (!isSameNumericValue(current[title], base[title])) {
         return true;
       }
@@ -5170,7 +5577,7 @@
     return false;
   }
 
-  function deriveGradeFromComponentEdits(componentEdit) {
+  function deriveGradeFromComponentEdits(componentEdit, fallbackTbThuongKy = null) {
     const groups = [
       { value: componentEdit.cc, weight: 1 },
       { value: componentEdit.tx, weight: 1 },
@@ -5186,7 +5593,11 @@
       denominator += group.weight;
     }
 
-    const tbThuongKy = denominator > 0 ? normalizeScore10(numerator / denominator) : null;
+    const tbThuongKy = denominator > 0
+      ? normalizeScore10(numerator / denominator)
+      : Number.isFinite(fallbackTbThuongKy)
+        ? normalizeScore10(fallbackTbThuongKy)
+        : null;
     const exam = Number.isFinite(componentEdit.exam) ? normalizeScore10(componentEdit.exam) : null;
     const total10 = Number.isFinite(tbThuongKy) && Number.isFinite(exam)
       ? normalizeScore10(roundToOneDecimal(tbThuongKy * 0.4 + exam * 0.6))
@@ -5219,7 +5630,7 @@
     if (!edit.componentEdit || typeof edit.componentEdit !== "object") {
       recomputeComponentEditFromFieldValues(edit);
     }
-    const derived = deriveGradeFromComponentEdits(edit.componentEdit);
+    const derived = deriveGradeFromComponentEdits(edit.componentEdit, record.components.tbThuongKy);
     const baseTotal10 = Number.isFinite(record.total10)
       ? normalizeScore10(record.total10)
       : Number.isFinite(record.rawTotal10)
@@ -6228,6 +6639,7 @@
       node.classList.contains("tdk-grade-cell-changed") ||
       node.classList.contains("tdk-grade-row-changed") ||
       node.classList.contains("tdk-grade-row-selected") ||
+      node.classList.contains("tdk-grade-generated-summary") ||
       node.classList.contains("tdk-grade-summary-changed") ||
       node.classList.contains("tdk-grade-inline-editable") ||
       node.classList.contains("tdk-grade-inline-input") ||
@@ -6239,7 +6651,7 @@
 
     return Boolean(
       node.closest(
-        "#tdk-modal-wrap, #tdk-export-modal-wrap, #tdk-brand-footer, #tdk-open-btn, #tdk-export-open-btn, #tdk-grade-open-btn, #tdk-grade-calc-btn, #tdk-grade-calc-scope, #tdk-grade-reset-all-btn, #tdk-grade-inline-controls, #tdk-grade-inline-status, #tdk-grade-wrap, #tdk-grade-modal, .tdk-manual-card, .tdk-render-root, .tdk-grade-summary, .tdk-grade-table-wrap, .tdk-grade-inline-editable, .tdk-grade-inline-input, .tdk-grade-cell-changed, .tdk-grade-row-changed, .tdk-grade-row-selected, .tdk-grade-summary-changed"
+        "#tdk-modal-wrap, #tdk-export-modal-wrap, #tdk-brand-footer, #tdk-open-btn, #tdk-export-open-btn, #tdk-grade-open-btn, #tdk-grade-calc-btn, #tdk-grade-calc-scope, #tdk-grade-reset-all-btn, #tdk-grade-inline-controls, #tdk-grade-inline-status, #tdk-grade-wrap, #tdk-grade-modal, .tdk-manual-card, .tdk-render-root, .tdk-grade-summary, .tdk-grade-table-wrap, .tdk-grade-inline-editable, .tdk-grade-inline-input, .tdk-grade-cell-changed, .tdk-grade-row-changed, .tdk-grade-row-selected, .tdk-grade-generated-summary, .tdk-grade-summary-changed"
       )
     );
   }
