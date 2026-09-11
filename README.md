@@ -9,7 +9,7 @@ Chrome Extension (Manifest V3) cho `https://sinhvien.uneti.edu.vn/*` với các 
 - Hỗ trợ **xuất lịch học đa định dạng**: `XLSX`, `CSV`, `JSON`, `HTML`, `PNG`, `PDF`.
 - Có thể xuất từ **popup** hoặc mở **panel xuất ngay trên trang lịch**.
 - Hỗ trợ **xuất bảng điểm + dự đoán GPA** từ trang `Kết quả học tập` với `XLSX`, `CSV`, `JSON`.
-- Hiển thị thương hiệu + logo + bản quyền `TranDangKhoaTechnology`.
+- Hiển thị thương hiệu + logo + bản quyền `TranDangKhoaAutomation`.
 - Icon extension (toolbar + extension list) dùng logo tại `assets/image/logo.png`.
 - Popup cấu hình JSON, Import/Export, khôi phục mặc định.
 

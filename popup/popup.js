@@ -2,7 +2,7 @@
 
 const CONFIG_KEY = "unetiScheduleConfigV1";
 const DEFAULT_CONFIG_URL = chrome.runtime.getURL("config/schedule-default.json");
-const DEFAULT_COMPANY = "TranDangKhoaTechnology";
+const DEFAULT_COMPANY = "TranDangKhoaAutomation";
 const DEFAULT_LOGO_PATH = "assets/image/logo.png";
 const SCHEDULE_TAB_HOST = "sinhvien.uneti.edu.vn";
 const SCHEDULE_TAB_PATHS = new Set([
